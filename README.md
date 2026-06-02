@@ -1,6 +1,3 @@
-# JellyFin-health-monitor
-A lightweight cross-platform Jellyfin health monitor with Discord alerts, local dashboard output, service restart support, disk usage checks, Docker container checks, and optional public URL/tunnel monitoring. Includes Windows Task Scheduler and Linux systemd setups.
-
 # Jellyfin Health Monitor
 
 A lightweight cross-platform health monitor for Jellyfin servers.
@@ -21,6 +18,8 @@ It checks Jellyfin availability, public URLs, resource usage, disks, Docker cont
 - Local `dashboard.html` status page
 - Windows Task Scheduler setup
 - Linux systemd timer setup
+
+<img width="1189" height="680" alt="Screenshot 2026-06-03 012103" src="https://github.com/user-attachments/assets/b8482caf-2d90-4838-bc7d-26712b445863" />
 
 ## Folders
 
