@@ -1,0 +1,56 @@
+{
+  "DiscordWebhookUrl": "",
+  "AlertCooldownMinutes": 30,
+  "StatePath": ".\\monitor-state.json",
+  "StatusJsonPath": ".\\status.json",
+  "DashboardPath": ".\\dashboard.html",
+
+  "Jellyfin": {
+    "Url": "http://localhost:8096",
+    "PublicUrls": [],
+    "ApiKey": "",
+    "ServiceName": "JellyfinServer",
+    "ExecutablePath": "",
+    "ProcessNames": ["JellyfinServer", "jellyfin"],
+    "RestartEnabled": false,
+    "RestartAfterFailedChecks": 3,
+    "CpuWarnPercent": 85,
+    "MemoryWarnPercentOfHost": 85
+  },
+
+  "Tunnel": {
+    "ServiceName": "",
+    "RestartEnabled": false,
+    "RestartAfterFailedChecks": 3
+  },
+
+  "MediaDisks": [
+    {
+      "Name": "Media",
+      "Path": "D:\\Media",
+      "WarnPercent": 90
+    }
+  ],
+
+  "DockerContainers": [
+    {
+      "Name": "jellyseerr",
+      "RestartEnabled": false
+    }
+  ],
+
+  "ArrServices": [
+    {
+      "Name": "Sonarr",
+      "Url": "http://localhost:8989",
+      "ApiKey": "",
+      "Enabled": false
+    },
+    {
+      "Name": "Radarr",
+      "Url": "http://localhost:7878",
+      "ApiKey": "",
+      "Enabled": false
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+[Unit]
+Description=Jellyfin Health Monitor
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jellyfin-health-monitor/linux
+ExecStart=/usr/bin/python3 /opt/jellyfin-health-monitor/linux/monitor.py
