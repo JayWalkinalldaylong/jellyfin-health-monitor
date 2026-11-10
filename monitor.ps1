@@ -55,29 +55,39 @@ function Set-StateValue {
     $State[$Key] = $Value
 }
 
-function Test-ShouldAlert {
-    param([hashtable]$State, [string]$Key, [int]$CooldownMinutes)
-    $now = Get-Date
-    $lastAlerts = Convert-ToHashtable (Get-StateValue -State $State -Key "LastAlerts" -Default @{})
-    if ($lastAlerts.ContainsKey($Key)) {
-        $last = [datetime]$lastAlerts[$Key]
-        if (($now - $last).TotalMinutes -lt $CooldownMinutes) { return $false }
-    }
-    $lastAlerts[$Key] = $now.ToString("o")
-    Set-StateValue -State $State -Key "LastAlerts" -Value $lastAlerts
-    return $true
-}
+function Send-ProblemAlert {
+    param(
+        [string]$Key, [string]$Title, [string]$Detail,
+        [int]$Color = 15158332, [switch]$Ping
+    )
 
-function Send-DiscordAlert {
-    param([object]$Config, [string]$Message)
-    Write-Host $Message
-    if ([string]::IsNullOrWhiteSpace($Config.DiscordWebhookUrl)) { return }
-    $payload = @{ content = $Message } | ConvertTo-Json -Compress
+    if (Get-StateValue -State $state -Key $Key -Default $false) { return }
+    Write-Host "$Title - $Detail"
+    if ([string]::IsNullOrWhiteSpace($config.DiscordWebhookUrl)) { return }
+
+    $payload = @{
+        allowed_mentions = @{ parse = @() }
+        embeds = @(@{
+            title = $Title
+            description = $Detail
+            color = $Color
+            fields = @(@{ name = "Monitor host"; value = $env:COMPUTERNAME; inline = $true })
+            footer = @{ text = "Jellyfin Health Monitor" }
+            timestamp = [datetime]::UtcNow.ToString("o")
+        })
+    }
+    $userId = Get-OptionalProperty -Object $config -Name "DiscordUserId" -Default ""
+    if ($Ping -and $userId -match '^[0-9]{17,20}$') {
+        $payload.content = "<@$userId>"
+        $payload.allowed_mentions.users = @([string]$userId)
+    }
     try {
-        Invoke-RestMethod -Method Post -Uri $Config.DiscordWebhookUrl -ContentType "application/json" -Body $payload | Out-Null
+        Invoke-RestMethod -Method Post -Uri $config.DiscordWebhookUrl -ContentType "application/json" `
+            -Body ($payload | ConvertTo-Json -Depth 8 -Compress) -TimeoutSec 15 | Out-Null
+        Set-StateValue -State $state -Key $Key -Value $true
     }
     catch {
-        Write-Warning "Discord alert failed: $($_.Exception.Message)"
+        Write-Warning "Discord could not deliver the alert. The next run will retry if the problem persists."
     }
 }
 
@@ -219,22 +229,8 @@ $statePath = Resolve-LocalPath -Path $config.StatePath
 $statusJsonPath = Resolve-LocalPath -Path $config.StatusJsonPath
 $dashboardPath = Resolve-LocalPath -Path $config.DashboardPath
 $state = Convert-ToHashtable (Read-JsonFile -Path $statePath -Default @{})
-$cooldown = [int]$config.AlertCooldownMinutes
 $script:StatusItems = @()
 $generatedAt = Get-Date
-
-trap {
-    try {
-        if (Test-ShouldAlert -State $state -Key "monitor-crash" -CooldownMinutes $cooldown) {
-            Send-DiscordAlert -Config $config -Message "Jellyfin Health Monitor crashed: $($_.Exception.Message)"
-            Save-JsonFile -Path $statePath -Value $state
-        }
-    }
-    catch {
-        Write-Warning "Could not send monitor crash alert: $($_.Exception.Message)"
-    }
-    break
-}
 
 try {
     $publicInfo = Invoke-HealthRequest -Uri "$($config.Jellyfin.Url.TrimEnd('/'))/System/Info/Public"
@@ -242,47 +238,54 @@ try {
         Invoke-HealthRequest -Uri "$($config.Jellyfin.Url.TrimEnd('/'))/System/Info" -ApiKey $config.Jellyfin.ApiKey | Out-Null
     }
     Set-StateValue -State $state -Key "JellyfinFailedChecks" -Value 0
+    $state.Remove("alert-jellyfin")
     Add-StatusItem -Name "Jellyfin Local" -Status "ok" -Detail "Jellyfin is reachable."
 }
 catch {
     $failedChecks = [int](Get-StateValue -State $state -Key "JellyfinFailedChecks" -Default 0) + 1
     Set-StateValue -State $state -Key "JellyfinFailedChecks" -Value $failedChecks
-    Send-DiscordAlert -Config $config -Message "Jellyfin is unreachable. Failed checks: $failedChecks. Error: $($_.Exception.Message)"
+    if ($failedChecks -ge 3) {
+        Send-ProblemAlert -Key "alert-jellyfin" -Title "Jellyfin is offline" `
+            -Detail "**Check:** Local Jellyfin`n**Consecutive failures:** $failedChecks`n**Error:** $($_.Exception.Message)" -Ping
+    }
     Add-StatusItem -Name "Jellyfin Local" -Status "critical" -Detail "Unreachable. Failed checks: $failedChecks."
     if ($config.Jellyfin.RestartEnabled -and $failedChecks -ge [int]$config.Jellyfin.RestartAfterFailedChecks) {
         try {
             $restartMessage = Restart-Jellyfin -Config $config
             Set-StateValue -State $state -Key "JellyfinFailedChecks" -Value 0
-            Send-DiscordAlert -Config $config -Message $restartMessage
+            Write-Host $restartMessage
         }
         catch {
-            Send-DiscordAlert -Config $config -Message "Jellyfin restart failed: $($_.Exception.Message)"
+            Write-Host "Jellyfin restart failed: $($_.Exception.Message)"
         }
     }
 }
 
 foreach ($publicUrl in @($config.Jellyfin.PublicUrls)) {
     if ([string]::IsNullOrWhiteSpace($publicUrl)) { continue }
+    $publicKey = "public-$publicUrl"
     try {
         Invoke-HealthRequest -Uri "$($publicUrl.TrimEnd('/'))/System/Info/Public" | Out-Null
-        Set-StateValue -State $state -Key "TunnelFailedChecks" -Value 0
+        $state.Remove($publicKey)
+        $state.Remove("alert-$publicKey")
         Add-StatusItem -Name "Public URL" -Status "ok" -Detail "$publicUrl is reachable."
     }
     catch {
-        $failedChecks = [int](Get-StateValue -State $state -Key "TunnelFailedChecks" -Default 0) + 1
-        Set-StateValue -State $state -Key "TunnelFailedChecks" -Value $failedChecks
-        if (Test-ShouldAlert -State $state -Key "public-url-$publicUrl" -CooldownMinutes $cooldown) {
-            Send-DiscordAlert -Config $config -Message "Public Jellyfin URL is unreachable: $publicUrl. Failed checks: $failedChecks."
+        $failedChecks = [int](Get-StateValue -State $state -Key $publicKey -Default 0) + 1
+        Set-StateValue -State $state -Key $publicKey -Value $failedChecks
+        if ($failedChecks -ge 3 -and (Get-StateValue -State $state -Key "JellyfinFailedChecks" -Default 0) -eq 0) {
+            Send-ProblemAlert -Key "alert-$publicKey" -Title "JayFlix is unreachable from outside" `
+                -Detail "**Public URL:** $publicUrl`n**Consecutive failures:** $failedChecks`nJellyfin is responding locally." -Ping
         }
         Add-StatusItem -Name "Public URL" -Status "critical" -Detail "$publicUrl is unreachable. Failed checks: $failedChecks."
         if ($config.Tunnel.RestartEnabled -and $failedChecks -ge [int]$config.Tunnel.RestartAfterFailedChecks) {
             try {
                 $restartMessage = Restart-WindowsServiceIfPresent -ServiceName $config.Tunnel.ServiceName
-                Set-StateValue -State $state -Key "TunnelFailedChecks" -Value 0
-                Send-DiscordAlert -Config $config -Message $restartMessage
+                Set-StateValue -State $state -Key $publicKey -Value 0
+                Write-Host $restartMessage
             }
             catch {
-                Send-DiscordAlert -Config $config -Message "Tunnel restart failed: $($_.Exception.Message)"
+                Write-Host "Tunnel restart failed: $($_.Exception.Message)"
             }
         }
     }
@@ -301,18 +304,33 @@ else {
 }
 
 foreach ($disk in $config.MediaDisks) {
+    $capacityKey = "alert-capacity-$($disk.Path)"
+    $healthKey = "alert-drive-$($disk.Path)"
     try {
         $item = Get-Item -LiteralPath $disk.Path -ErrorAction Stop
         $drive = New-Object System.IO.DriveInfo($item.PSDrive.Root)
-        $usedPercent = (($drive.TotalSize - $drive.AvailableFreeSpace) / $drive.TotalSize) * 100
+        $free = $drive.AvailableFreeSpace
+        $total = $drive.TotalSize
+        $usedPercent = 100 * (1 - $free / $total)
+        $volume = Get-Volume -DriveLetter $item.PSDrive.Name -ErrorAction SilentlyContinue
+        if ($null -ne $volume -and $volume.HealthStatus -in @("Warning", "Unhealthy")) {
+            throw "Windows reports volume health as $($volume.HealthStatus)."
+        }
+        $state.Remove($healthKey)
         $status = if ($usedPercent -ge [double]$disk.WarnPercent) { "warn" } else { "ok" }
         Add-StatusItem -Name "Disk: $($disk.Name)" -Status $status -Detail $disk.Path -Value $usedPercent
-        if ($status -eq "warn" -and (Test-ShouldAlert -State $state -Key "disk-$($disk.Name)" -CooldownMinutes $cooldown)) {
-            Send-DiscordAlert -Config $config -Message ("Disk '{0}' is almost full: {1:N1}%." -f $disk.Name, $usedPercent)
+        if ($status -eq "warn") {
+            Send-ProblemAlert -Key $capacityKey -Title "Media drive is nearly full" -Color 15105570 `
+                -Detail ("**Drive:** {0} ({1})`n**Used:** {2:N1}%`n**Free:** {3:N1} GiB`n**Threshold:** {4}%" -f $disk.Name, $disk.Path, $usedPercent, ($free / 1GB), $disk.WarnPercent)
+        }
+        else {
+            $state.Remove($capacityKey)
         }
     }
     catch {
         Add-StatusItem -Name "Disk: $($disk.Name)" -Status "critical" -Detail "Disk check failed."
+        Send-ProblemAlert -Key $healthKey -Title "Media drive needs attention" `
+            -Detail "**Drive:** $($disk.Name) ($($disk.Path))`n**Error:** $($_.Exception.Message)"
     }
 }
 
@@ -323,7 +341,7 @@ foreach ($container in $config.DockerContainers) {
         }
         else {
             Add-StatusItem -Name "Docker: $($container.Name)" -Status "critical" -Detail "Container is not running."
-            Send-DiscordAlert -Config $config -Message "Docker container '$($container.Name)' is not running."
+            Write-Host "Docker container '$($container.Name)' is not running."
             if ($container.RestartEnabled) { Restart-DockerContainer -Name $container.Name }
         }
     }
